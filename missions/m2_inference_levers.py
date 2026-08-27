@@ -210,10 +210,101 @@ def _reasoning_budget(rows, split):
     }
 
 
+# Display labels — machine names in the data stay stable; UI shows these.
+_IE_STAGE_LABELS = {
+    "baseline": "Baseline (large model; no cache/batch)",
+    "cascade": "+ Cascade",
+    "cascade+cache": "+ Cache (after cascade)",
+    "all_three": "+ Batch (all three)",
+    "cascade_only": "Cascade only",
+    "cache_only": "Cache only",
+    "batch_only": "Batch only",
+}
+_IE_LEVER_LABELS = {"cascade": "Cascade", "cache": "Cache", "batch": "Batch"}
+
+
+def _inference_economics(total_tokens, baseline_cost, cascade_only_cost, cache_only_cost,
+                         batch_only_cost, cascade_cache_cost, all_three_cost):
+    """Inference Unit Economics ($/1M-token): sequential stages + isolated levers.
+
+    Sequential order is cascade -> cache -> batch; each stage is measured on top of
+    the previous one, so the per-lever contributions depend on that order. The
+    isolated single-lever scenarios overlap and must NOT be summed. All values are
+    raw floats (rounded only when printed / rendered). Each row also carries a
+    friendly `label`; the machine `name` fields are unchanged.
+    """
+    def _per_m(cost):
+        return pricing.dollars_per_million(cost, total_tokens)
+
+    def _stage(name, cost, prev_cost):
+        return {
+            "name": name,
+            "label": _IE_STAGE_LABELS.get(name, name),
+            "usd_day": cost,
+            "per_m": _per_m(cost),
+            "incremental_savings_usd_day": (prev_cost - cost) if prev_cost is not None else 0.0,
+            "cumulative_savings_pct": ((baseline_cost - cost) / baseline_cost * 100.0)
+            if baseline_cost else 0.0,
+        }
+
+    stages = [
+        _stage("baseline", baseline_cost, None),
+        _stage("cascade", cascade_only_cost, baseline_cost),
+        _stage("cascade+cache", cascade_cache_cost, cascade_only_cost),
+        _stage("all_three", all_three_cost, cascade_cache_cost),
+    ]
+
+    def _iso(name, cost):
+        return {
+            "name": name,
+            "label": _IE_STAGE_LABELS.get(name, name),
+            "usd_day": cost,
+            "per_m": _per_m(cost),
+            "savings_pct_vs_baseline": ((baseline_cost - cost) / baseline_cost * 100.0)
+            if baseline_cost else 0.0,
+        }
+
+    isolated = [
+        _iso("cascade_only", cascade_only_cost),
+        _iso("cache_only", cache_only_cost),
+        _iso("batch_only", batch_only_cost),
+    ]
+
+    contributions = {
+        "cascade": baseline_cost - cascade_only_cost,
+        "cache": cascade_only_cost - cascade_cache_cost,
+        "batch": cascade_cache_cost - all_three_cost,
+    }
+    largest = max(contributions, key=contributions.get)
+    order_label = " -> ".join(_IE_LEVER_LABELS[k] for k in ("cascade", "cache", "batch"))
+
+    return {
+        "sequential_order": ["cascade", "cache", "batch"],
+        "sequential_order_label": order_label,
+        "lever_labels": dict(_IE_LEVER_LABELS),
+        "stage_labels": dict(_IE_STAGE_LABELS),
+        "total_tokens": total_tokens,
+        "stages": stages,
+        "isolated": isolated,
+        "sequential_contributions": contributions,
+        "total_sequential_savings_usd_day": baseline_cost - all_three_cost,
+        "largest_sequential_lever": {
+            "name": largest,
+            "label": _IE_LEVER_LABELS.get(largest, largest),
+            "usd_day": contributions[largest],
+        },
+        "note": ("Sequential contributions are order-dependent ({o}, each measured on top of "
+                 "the previous one); the isolated single-lever scenarios overlap, so their "
+                 "savings do not add up to the fully optimized total.").format(o=order_label),
+    }
+
+
 def run(verbose: bool = True) -> dict:
     rows = load_csv("token_usage.csv")
     base_cost = opt_cost = 0.0
     total_tokens = 0
+    # Inference Unit Economics: per-lever scenario sums (raw floats, rounded only on print)
+    cascade_only_cost = cache_only_cost = batch_only_cost = cascade_cache_cost = 0.0
     # Extension 4: reasoning vs non-reasoning tallies (does not affect the figures above)
     r_n = nr_n = 0
     r_tok = nr_tok = 0
@@ -232,6 +323,11 @@ def run(verbose: bool = True) -> dict:
         pin, pout = MODEL_PRICES[r["route_tier"]]
         opt_req = pricing.request_cost(inp, out, pin, pout, cached_in=cached, batch=is_batch)
         opt_cost += opt_req
+        # Inference Unit Economics: isolate each lever with the same pricing.request_cost
+        cascade_only_cost += pricing.request_cost(inp, out, pin, pout)
+        cache_only_cost += pricing.request_cost(inp, out, lin, lout, cached_in=cached)
+        batch_only_cost += pricing.request_cost(inp, out, lin, lout, batch=is_batch)
+        cascade_cache_cost += pricing.request_cost(inp, out, pin, pout, cached_in=cached)
         # Extension 4: attribute the optimized cost + energy to the reasoning segment
         wh = sustainability.wh_per_query(inp + out, is_reasoning=is_reasoning)
         if is_reasoning:
@@ -254,6 +350,11 @@ def run(verbose: bool = True) -> dict:
         "r_cost": r_cost, "nr_cost": nr_cost, "r_wh": r_wh, "nr_wh": nr_wh,
     })
 
+    inference_economics = _inference_economics(
+        total_tokens, base_cost, cascade_only_cost, cache_only_cost,
+        batch_only_cost, cascade_cache_cost, opt_cost,
+    )
+
     if verbose:
         print("== M2 Inference Cost Levers ==")
         print(f"requests={len(rows)}  tokens={total_tokens:,}")
@@ -261,6 +362,23 @@ def run(verbose: bool = True) -> dict:
         print(f"optimized : ${opt_cost:,.2f}/day   ${opt_pm:.3f}/1M-token")
         print(f"savings   : {savings_pct:.1f}%  (cascade + caching + batch)")
         print(f"discount stack (batch + 100% cache): {pricing.discount_stack(batch=True, cache_hit_frac=1.0):.3f} of naive")
+
+        ie = inference_economics
+        print()
+        print("-- Inference Unit Economics ($/1M-token) --")
+        print(f"sequential order: {ie['sequential_order_label']}")
+        print(f"{'stage':40}{'$/day':>12}{'$/1M-tok':>11}{'incr save $/day':>18}{'cum save %':>13}")
+        for s in ie["stages"]:
+            print(f"{s['label']:40}{s['usd_day']:>12,.4f}{s['per_m']:>11,.4f}"
+                  f"{s['incremental_savings_usd_day']:>18,.4f}{s['cumulative_savings_pct']:>12,.2f}%")
+        print(f"{'isolated lever':40}{'$/day':>12}{'$/1M-tok':>11}{'save vs baseline':>18}")
+        for s in ie["isolated"]:
+            print(f"{s['label']:40}{s['usd_day']:>12,.4f}{s['per_m']:>11,.4f}"
+                  f"{s['savings_pct_vs_baseline']:>17,.2f}%")
+        lg = ie["largest_sequential_lever"]
+        print(f"largest sequential lever: {lg['label']} (${lg['usd_day']:,.4f}/day)   "
+              f"total sequential savings: ${ie['total_sequential_savings_usd_day']:,.4f}/day")
+        print(f"note: {ie['note']}")
 
         rb = reasoning
         print()
@@ -292,6 +410,7 @@ def run(verbose: bool = True) -> dict:
         "baseline_per_m": round(base_pm, 3), "optimized_per_m": round(opt_pm, 3),
         "savings_pct": round(savings_pct, 1), "total_tokens": total_tokens,
         "reasoning": reasoning,
+        "inference_economics": inference_economics,
     }
 
 

@@ -4,13 +4,15 @@ from __future__ import annotations
 
 def build_report(baseline_usd: float, optimized_usd: float, levers: dict,
                  sustainability: dict | None = None, period: str = "monthly",
-                 reasoning=None, carbon_schedule=None) -> str:
+                 reasoning=None, carbon_schedule=None,
+                 inference_economics=None, baseline_composite=None) -> str:
     """Return a markdown cost-optimization report.
 
-    `reasoning` (optional, Extension 4) is the dict returned under
-    m2_inference_levers.run()["reasoning"]. `carbon_schedule` (optional,
-    Extension 5) is the dict returned by ext_carbon_aware_scheduling.run().
-    Both are additive: when omitted the report is unchanged.
+    `reasoning` (optional, Extension 4) is m2_inference_levers.run()["reasoning"].
+    `carbon_schedule` (optional, Extension 5) is ext_carbon_aware_scheduling.run().
+    `inference_economics` (optional) is m2_inference_levers.run()["inference_economics"]
+    and `baseline_composite` (optional) describes how the monthly baseline splits
+    across scopes. All are additive: when omitted the report is unchanged.
     """
     savings = baseline_usd - optimized_usd
     pct = (savings / baseline_usd * 100.0) if baseline_usd > 0 else 0.0
@@ -29,6 +31,18 @@ def build_report(baseline_usd: float, optimized_usd: float, levers: dict,
     ]
     for name, amount in levers.items():
         lines.append(f"| {name} | ${amount:,.0f} |")
+    if baseline_composite:
+        bc = baseline_composite
+        lines += [
+            "",
+            f"_Scope: the ${baseline_usd:,.0f} baseline spend above is a **composite** = "
+            f"{bc['days']} x M2 inference baseline/day (= ${bc['inference_baseline_monthly']:,.0f}/month) "
+            f"+ M3 purchasing workload monthly baseline (= ${bc['purchasing_baseline_monthly']:,.0f}/month). "
+            f"The $/1M-token table below is **inference traffic only** (M2, one sample day) — a "
+            f"different scope; the two totals are not directly comparable._",
+        ]
+    if inference_economics:
+        lines += _inference_economics_section(inference_economics)
     if sustainability:
         lines += [
             "",
@@ -94,6 +108,52 @@ def _fmt(value, spec, dash="n/a"):
     if value is None:
         return dash
     return format(value, spec)
+
+
+def _inference_economics_section(ie):
+    """Markdown lines for the 'Inference Unit Economics ($/1M-token)' section."""
+    order = ie.get("sequential_order_label") or " -> ".join(ie["sequential_order"])
+    lever_labels = ie.get("lever_labels", {})
+    out = [
+        "",
+        "## Inference Unit Economics ($/1M-token)",
+        "",
+        f"_Inference traffic only (M2, one sample day). Sequential order: {order} — each "
+        f"lever is measured on top of the previous one._",
+        "",
+        "| Stage | $/day | $/1M-token | Incremental savings $/day | Cumulative savings % |",
+        "|---|---|---|---|---|",
+    ]
+    for s in ie["stages"]:
+        out.append(
+            f"| {s.get('label', s['name'])} | {s['usd_day']:,.4f} | {s['per_m']:,.4f} "
+            f"| {s['incremental_savings_usd_day']:,.4f} | {s['cumulative_savings_pct']:,.2f}% |"
+        )
+    out += [
+        "",
+        "| Isolated lever (vs baseline) | $/day | $/1M-token | Savings vs baseline % |",
+        "|---|---|---|---|",
+    ]
+    for s in ie["isolated"]:
+        out.append(
+            f"| {s.get('label', s['name'])} | {s['usd_day']:,.4f} | {s['per_m']:,.4f} "
+            f"| {s['savings_pct_vs_baseline']:,.2f}% |"
+        )
+    lg = ie["largest_sequential_lever"]
+    contrib = ie["sequential_contributions"]
+    contrib_str = ", ".join(
+        f"{lever_labels.get(k, k)} ${contrib[k]:,.4f}/day" for k in ie["sequential_order"]
+    )
+    out += [
+        "",
+        f"- Sequential per-lever contribution ({order}): {contrib_str}.",
+        f"- Largest sequential lever (by max contribution): **{lg.get('label', lg['name'])}** "
+        f"(${lg['usd_day']:,.4f}/day).",
+        f"- Total sequential savings: ${ie['total_sequential_savings_usd_day']:,.4f}/day "
+        f"(baseline minus the fully optimized scenario).",
+        f"- {ie['note']}",
+    ]
+    return out
 
 
 def _carbon_section(cs):

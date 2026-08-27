@@ -53,9 +53,18 @@ def run(verbose: bool = True) -> dict:
         "best_region": min(sustainability.REGION_CARBON, key=sustainability.REGION_CARBON.get),
     }
 
+    # Scope note for the report: the monthly baseline is a composite of two scopes.
+    baseline_composite = {
+        "inference_baseline_monthly": r2["baseline_daily"] * DAYS,
+        "purchasing_baseline_monthly": r3["on_demand_monthly"],
+        "days": DAYS,
+    }
+
     md = report.build_report(baseline, optimized, levers, sustainability=sust,
                              reasoning=r2.get("reasoning"),
-                             carbon_schedule=r_carbon)
+                             carbon_schedule=r_carbon,
+                             inference_economics=r2.get("inference_economics"),
+                             baseline_composite=baseline_composite)
     out_md = os.path.join(ROOT, "outputs", "report.md")
     os.makedirs(os.path.dirname(out_md), exist_ok=True)
     with open(out_md, "w") as f:
@@ -70,7 +79,8 @@ def run(verbose: bool = True) -> dict:
     return {"baseline_monthly": round(baseline), "optimized_monthly": round(optimized),
             "levers": levers, "total_savings_pct": round(total_pct, 1),
             "reasoning": r2.get("reasoning"),
-            "carbon_schedule": r_carbon}
+            "carbon_schedule": r_carbon,
+            "inference_economics": r2.get("inference_economics")}
 
 
 if __name__ == "__main__":
