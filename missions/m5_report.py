@@ -8,7 +8,7 @@ _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)
 import os
 from missions._common import num, catalog_by_type, ROOT
 from finops import report, sustainability
-from missions import m1_efficiency_audit, m2_inference_levers, m3_purchasing
+from missions import m1_efficiency_audit, m2_inference_levers, m3_purchasing, ext_carbon_aware_scheduling
 
 DAYS = 30
 # one tier down for over-provisioned ("util-lie") GPUs
@@ -19,6 +19,7 @@ def run(verbose: bool = True) -> dict:
     r1 = m1_efficiency_audit.run(verbose=False)
     r2 = m2_inference_levers.run(verbose=False)
     r3 = m3_purchasing.run(verbose=False)
+    r_carbon = ext_carbon_aware_scheduling.run(verbose=False)  # Extension 5 (additive, not a lever)
     cat = catalog_by_type()
 
     # --- buckets ---
@@ -53,7 +54,8 @@ def run(verbose: bool = True) -> dict:
     }
 
     md = report.build_report(baseline, optimized, levers, sustainability=sust,
-                             reasoning=r2.get("reasoning"))
+                             reasoning=r2.get("reasoning"),
+                             carbon_schedule=r_carbon)
     out_md = os.path.join(ROOT, "outputs", "report.md")
     os.makedirs(os.path.dirname(out_md), exist_ok=True)
     with open(out_md, "w") as f:
@@ -67,7 +69,8 @@ def run(verbose: bool = True) -> dict:
 
     return {"baseline_monthly": round(baseline), "optimized_monthly": round(optimized),
             "levers": levers, "total_savings_pct": round(total_pct, 1),
-            "reasoning": r2.get("reasoning")}
+            "reasoning": r2.get("reasoning"),
+            "carbon_schedule": r_carbon}
 
 
 if __name__ == "__main__":

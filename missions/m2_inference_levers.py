@@ -140,7 +140,7 @@ def _reasoning_budget(rows, split):
         rule = ("Reasoning is {s:.1f}% of traffic, below the {p:.0f}% budget, so no request "
                 "needs to be cut right now (input_tokens >= {t} here is only the minimum "
                 "observed while the cap is non-binding, not a policy threshold). Rule: monitor "
-                "the reasoning share; if it is forecast to reach or exceeds {p:.0f}%, rank the "
+                "the reasoning share; if it is forecast to reach or exceed {p:.0f}%, rank the "
                 "reasoning candidates by input_tokens descending with a deterministic tie-break "
                 "(ts, then original order), keep at most floor({p:.0f}% x total_requests), and "
                 "recompute the threshold from that batch. {note}."

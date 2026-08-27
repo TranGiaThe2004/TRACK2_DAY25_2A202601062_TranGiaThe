@@ -4,11 +4,13 @@ from __future__ import annotations
 
 def build_report(baseline_usd: float, optimized_usd: float, levers: dict,
                  sustainability: dict | None = None, period: str = "monthly",
-                 reasoning=None) -> str:
+                 reasoning=None, carbon_schedule=None) -> str:
     """Return a markdown cost-optimization report.
 
     `reasoning` (optional, Extension 4) is the dict returned under
-    m2_inference_levers.run()["reasoning"]; when omitted the report is unchanged.
+    m2_inference_levers.run()["reasoning"]. `carbon_schedule` (optional,
+    Extension 5) is the dict returned by ext_carbon_aware_scheduling.run().
+    Both are additive: when omitted the report is unchanged.
     """
     savings = baseline_usd - optimized_usd
     pct = (savings / baseline_usd * 100.0) if baseline_usd > 0 else 0.0
@@ -81,8 +83,95 @@ def build_report(baseline_usd: float, optimized_usd: float, levers: dict,
             "",
         ]
         lines += [f"- {a}" for a in rb.get("assumptions", [])]
+    if carbon_schedule:
+        lines += _carbon_section(carbon_schedule)
     lines += ["", "_Figures are June-2026 as-of snapshots; re-baseline before acting._"]
     return "\n".join(lines)
+
+
+def _fmt(value, spec, dash="n/a"):
+    """Format `value` with `spec`, or return `dash` when value is None."""
+    if value is None:
+        return dash
+    return format(value, spec)
+
+
+def _carbon_section(cs):
+    """Markdown lines for the Extension 5 'Carbon-Aware Scheduling' section."""
+    b = cs["baseline_region"]
+    c = cs["cleanest_region"]
+    out = [
+        "",
+        "## Carbon-Aware Scheduling",
+        "",
+        "_Extension 5 — relocate interruptible (training / batch) jobs to a cleaner grid region. "
+        "The electricity delta is a modeled electricity cost only, not a GPU cloud-bill saving, "
+        "and is excluded from the four levers and total_savings_pct above._",
+        "",
+        f"Interruptible jobs analyzed: {cs['interruptible_job_count']}  ·  "
+        f"configured job-run energy: {cs['total_energy_kwh']:,.2f} kWh "
+        f"(each job = its own hours_per_day x days, not a calendar month)",
+        "",
+        f"| Job | GPU | Energy kWh | Baseline gCO2e ({b}) | Cleanest gCO2e ({c}) "
+        f"| Carbon saved gCO2e | Electricity delta USD |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for j in cs["jobs"]:
+        out.append(
+            f"| {j['job_id']} | {j['gpu_type']} x{j['num_gpus']} | {j['energy_kwh']:,.2f} "
+            f"| {j['baseline_carbon_gco2e']:,.1f} | {j['cleanest_carbon_gco2e']:,.1f} "
+            f"| {j['carbon_saved_gco2e']:,.1f} | {j['electricity_cost_delta_usd']:+,.2f} |"
+        )
+    out += [
+        "",
+        "_Electricity delta sign: negative = the cleaner region also costs less modeled electricity._",
+        "",
+        "| Region | $/kWh | gCO2/kWh | Total energy kWh | Total electricity USD | Total carbon gCO2e |",
+        "|---|---|---|---|---|---|",
+    ]
+    for x in cs["region_table"]:
+        out.append(
+            f"| {x['region']} | {_fmt(x['usd_per_kwh'], '.3f')} | {_fmt(x['gco2_per_kwh'], '.0f')} "
+            f"| {x['total_energy_kwh']:,.2f} | {_fmt(x['total_electricity_usd'], ',.2f')} "
+            f"| {_fmt(x['total_carbon_gco2e'], ',.1f')} |"
+        )
+    bvc = cs["baseline_vs_cleanest"]
+    out += [
+        "",
+        f"**Baseline ({b}) vs cleanest ({c}):**",
+        "",
+        f"- Carbon: {_fmt(bvc['baseline_carbon_gco2e'], ',.1f')} -> "
+        f"{_fmt(bvc['cleanest_carbon_gco2e'], ',.1f')} gCO2e "
+        f"(saved {_fmt(bvc['carbon_saved_gco2e'], ',.1f')} gCO2e, "
+        f"{_fmt(bvc['carbon_reduction_pct'], '.1f')}% reduction)",
+        f"- Modeled electricity: ${_fmt(bvc['baseline_electricity_usd'], ',.2f')} -> "
+        f"${_fmt(bvc['cleanest_electricity_usd'], ',.2f')} "
+        f"(delta {_fmt(bvc['electricity_cost_delta_usd'], '+,.2f')} USD — modeled electricity, "
+        f"not a cloud-bill saving)",
+        "",
+        f"- **Cheapest region** (min $/kWh): {cs['cheapest_region']}",
+        f"- **Cleanest region** (min gCO2/kWh): {cs['cleanest_region']}",
+        f"- **Balanced region** (equal-weight 50/50): {cs['balanced_region']}",
+        "",
+        "| Region | normalized_cost | normalized_carbon | balanced_score |",
+        "|---|---|---|---|",
+    ]
+    for s in cs["balanced_scores"]:
+        out.append(
+            f"| {s['region']} | {s['normalized_cost']:.4f} | {s['normalized_carbon']:.4f} "
+            f"| {s['balanced_score']:.4f} |"
+        )
+    out += [
+        "",
+        f"_Balanced formula:_ {cs['balanced_formula']}",
+        "",
+        f"**Latency trade-off:** {cs['latency_note']}",
+        "",
+        "### Carbon-Aware Scheduling — Assumptions",
+        "",
+    ]
+    out += [f"- {a}" for a in cs.get("assumptions", [])]
+    return out
 
 
 def savings_waterfall(levers: dict, path: str) -> str:
