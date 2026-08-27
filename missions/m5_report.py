@@ -8,7 +8,8 @@ _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)
 import os
 from missions._common import num, catalog_by_type, ROOT
 from finops import report, sustainability
-from missions import m1_efficiency_audit, m2_inference_levers, m3_purchasing, ext_carbon_aware_scheduling
+from missions import (m1_efficiency_audit, m2_inference_levers, m3_purchasing, m4_allocation,
+                      ext_carbon_aware_scheduling)
 
 DAYS = 30
 # one tier down for over-provisioned ("util-lie") GPUs
@@ -19,6 +20,7 @@ def run(verbose: bool = True) -> dict:
     r1 = m1_efficiency_audit.run(verbose=False)
     r2 = m2_inference_levers.run(verbose=False)
     r3 = m3_purchasing.run(verbose=False)
+    r4 = m4_allocation.run(verbose=False)  # for the C.2 findings section (tag coverage / chargeback)
     r_carbon = ext_carbon_aware_scheduling.run(verbose=False)  # Extension 5 (additive, not a lever)
     cat = catalog_by_type()
 
@@ -60,11 +62,30 @@ def run(verbose: bool = True) -> dict:
         "days": DAYS,
     }
 
+    # C.2 findings section — all values sourced from r1/r3/r4/levers (nothing hardcoded).
+    findings = {
+        "util_lies": [
+            {"gpu_id": l["gpu_id"], "gpu_type": l["gpu_type"],
+             "gpu_util_pct": l["gpu_util_pct"], "mfu": l["mfu"], "mbu": l.get("mbu")}
+            for l in r1["lies"]
+        ],
+        "idle_gpus": [
+            {"gpu_id": s["gpu_id"], "gpu_type": s["gpu_type"], "idle_hours": s["idle_hours"]}
+            for s in r1["summary"] if s["idle_hours"] > 0
+        ],
+        "idle_waste_daily": r1["idle_waste_daily"],
+        "purchasing_baseline_monthly": r3["on_demand_monthly"],
+        "purchasing_savings_pct": r3["savings_pct"],
+        "tag_coverage": r4["tag_coverage"],
+        "chargeback_ready": r4["chargeback_ready"],
+    }
+
     md = report.build_report(baseline, optimized, levers, sustainability=sust,
                              reasoning=r2.get("reasoning"),
                              carbon_schedule=r_carbon,
                              inference_economics=r2.get("inference_economics"),
-                             baseline_composite=baseline_composite)
+                             baseline_composite=baseline_composite,
+                             findings=findings)
     out_md = os.path.join(ROOT, "outputs", "report.md")
     os.makedirs(os.path.dirname(out_md), exist_ok=True)
     with open(out_md, "w") as f:
@@ -80,7 +101,8 @@ def run(verbose: bool = True) -> dict:
             "levers": levers, "total_savings_pct": round(total_pct, 1),
             "reasoning": r2.get("reasoning"),
             "carbon_schedule": r_carbon,
-            "inference_economics": r2.get("inference_economics")}
+            "inference_economics": r2.get("inference_economics"),
+            "findings": findings}
 
 
 if __name__ == "__main__":
